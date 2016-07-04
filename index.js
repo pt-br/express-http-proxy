@@ -1,6 +1,7 @@
 var assert = require('assert');
+var util = require('util');
 var url = require('url');
-var http = require('http');
+var http = require('follow-redirects').http;
 var https = require('https');
 var getRawBody = require('raw-body');
 var isError = require('lodash.iserror');
@@ -8,28 +9,30 @@ var isError = require('lodash.iserror');
 require('buffer');
 
 module.exports = function proxy(host, options) {
-  'use strict';
 
   assert(host, 'Host should not be empty');
 
   options = options || {};
 
+  var port = 80;
+
   var parsedHost = null;
-  if (typeof host !== 'function') {
+  if (typeof host != 'function') {
     parsedHost = parseHost(host.toString());
-    if (isError(parsedHost)) {
+    if (isError(parsedHost))
       throw parsedHost;
-    }
   }
 
   /**
    * intercept(targetResponse, data, res, req, function(err, json));
    */
+  var preIntercept = options.preIntercept;
   var intercept = options.intercept;
   var decorateRequest = options.decorateRequest;
   var forwardPath = options.forwardPath || defaultForwardPath;
   var filter = options.filter || defaultFilter;
   var limit = options.limit || '1mb';
+  var preserveHostHdr = options.preserveHostHdr || false;
   var preserveReqSession = options.preserveReqSession;
 
   /* For reqBodyEncoding, these is a meaningful difference between null and
@@ -47,10 +50,9 @@ module.exports = function proxy(host, options) {
     path = forwardPath(req, res);
 
     if (!parsedHost) {
-        parsedHost = parseHost((typeof host === 'function') ? host(req) : host.toString());
-        if (isError(parsedHost)) {
-          throw parsedHost;
-        }
+        parsedHost = parseHost((typeof host == 'function') ? host(req) : host.toString());
+        if (isError(parsedHost))
+            throw parsedHost;
     }
 
     // var hasRequestBody = 'content-type' in req.headers || 'transfer-encoding' in req.headers;
@@ -80,27 +82,24 @@ module.exports = function proxy(host, options) {
         reqOpt.session = req.session;
       }
 
-      if (decorateRequest) {
+      if (decorateRequest)
         reqOpt = decorateRequest(reqOpt, req) || reqOpt;
-      }
 
       bodyContent = reqOpt.bodyContent;
       delete reqOpt.bodyContent;
       delete reqOpt.params;
 
-      if (err && !bodyContent) {
-        return next(err);
-      }
+      if (err && !bodyContent) return next(err);
 
-      if (typeof bodyContent === 'string') {
+      if (typeof bodyContent == 'string')
         reqOpt.headers['content-length'] = Buffer.byteLength(bodyContent);
-      } else if (Buffer.isBuffer(bodyContent)) { // Buffer
+      else if (Buffer.isBuffer(bodyContent)) // Buffer
         reqOpt.headers['content-length'] = bodyContent.length;
-      }
 
       var chunks = [];
       var realRequest = parsedHost.module.request(reqOpt, function(rsp) {
-
+        if (preIntercept) preIntercept(rsp);
+        var rspData = null;
         rsp.on('data', function(chunk) {
           chunks.push(chunk);
         });
@@ -133,17 +132,16 @@ module.exports = function proxy(host, options) {
                 }
               }
 
-              if (typeof rspd === 'string') {
+              if (typeof rspd == 'string')
                 rspd = new Buffer(rspd, encode);
-              }
 
               if (!Buffer.isBuffer(rspd)) {
                 next(new Error("intercept should return string or buffer as data"));
               }
 
-              if (!res.headersSent) {
+              if (!res.headersSent)
                 res.set('content-length', rspd.length);
-              } else if (rspd.length !== rspData.length) {
+              else if (rspd.length != rspData.length) {
                 next(new Error("'Content-Length' is already sent, the length of response data can not be changed"));
               }
 
@@ -160,33 +158,20 @@ module.exports = function proxy(host, options) {
           next(e);
         });
 
+
         if (!res.headersSent) { // if header is not set yet
           res.status(rsp.statusCode);
-          Object.keys(rsp.headers)
-            .filter(function (item) { return item !== 'transfer-encoding'; })
-            .forEach(function(item) {
-              res.set(item, rsp.headers[item]);
-            });
+          for (var p in rsp.headers) {
+            if (p == 'transfer-encoding')
+              continue;
+            res.set(p, rsp.headers[p]);
+          }
         }
+
       });
 
-      realRequest.on('socket', function (socket) {
-        if (options.timeout) {
-          socket.setTimeout(options.timeout, function (){
-            realRequest.abort();
-          });
-        }
-      });
-
-      realRequest.on('error', function(err) {
-        if (err.code === 'ECONNRESET') {
-          res.setHeader('X-Timout-Reason', 'express-http-proxy timed out your request after ' + options.timeout + 'ms.');
-          res.writeHead(504, {'Content-Type': 'text/plain'});
-          res.end();
-          next();
-        } else {
-          next(err);
-        }
+      realRequest.on('error', function(e) {
+        next(e);
       });
 
       if (bodyContent.length) {
@@ -199,26 +184,18 @@ module.exports = function proxy(host, options) {
 };
 
 
-
 function extend(obj, source, skips) {
-  'use strict';
-
-  if (!source) {
-    return obj;
-  }
+  if (!source) return obj;
 
   for (var prop in source) {
-    if (!skips || skips.indexOf(prop) === -1) {
+    if (!skips || skips.indexOf(prop) == -1)
       obj[prop] = source[prop];
-    }
   }
 
   return obj;
 }
 
 function parseHost(host) {
-  'use strict';
-
   if (!host) {
     return new Error("Empty host parameter");
   }
@@ -242,8 +219,6 @@ function parseHost(host) {
 }
 
 function reqHeaders(req, options) {
-  'use strict';
-
   var headers = options.headers || {};
 
   var skipHdrs = [ 'connection', 'content-length' ];
@@ -256,13 +231,11 @@ function reqHeaders(req, options) {
   return hds;
 }
 
-function defaultFilter() {
-  // no-op version of filter.  allows everything!
-  'use strict';
+function defaultFilter(req, res) {
+  // Allow everything!
   return true;
 }
 
-function defaultForwardPath(req) {
-  'use strict';
-  return url.parse(req.url).path;
+function defaultForwardPath(req, res) {
+    return url.parse(req.url).path;
 }
