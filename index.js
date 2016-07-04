@@ -2,7 +2,7 @@ var assert = require('assert');
 var util = require('util');
 var url = require('url');
 var http = require('follow-redirects').http;
-var https = require('https');
+var https = require('follow-redirects').https;
 var getRawBody = require('raw-body');
 var isError = require('lodash.iserror');
 
